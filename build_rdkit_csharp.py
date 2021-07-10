@@ -54,7 +54,7 @@ _platform_system_to_system: Mapping[str, SupportedSystem] = {
 }
 
 _vs_ver_to_cmake_option_catalog: Mapping[VisualStudioVersion, Mapping[CpuModel, Sequence[str]]] = {
-    "15.0": {"x86": ['-G"Visual Studio 15 2017"'], "x64": ['-G"Visual Studio 15 2017 Win64"'],},
+    "15.0": {"x86": ['-G"Visual Studio 15 2017"'], "x64": ['-G"Visual Studio 15 2017 Win64"'], },
     "16.0": {
         "x86": ['-G"Visual Studio 16 2019"', "-AWin32"],
         "x64": ['-G"Visual Studio 16 2019"'],
@@ -106,7 +106,8 @@ def replace_file_string(
     with open(filename, "r", encoding="utf-8") as file:
         filedata = file.read()
         for pattern, replace in pattern_replace:
-            filedata = re.sub(pattern, replace, filedata, flags=re.MULTILINE | re.DOTALL)
+            filedata = re.sub(pattern, replace, filedata,
+                              flags=re.MULTILINE | re.DOTALL)
     with open(filename, "w", encoding="utf-8") as file:
         file.write(filedata)
 
@@ -217,6 +218,8 @@ class Config:
         self.pixman_path: Optional[Path] = None
         self.cairo_path: Optional[Path] = None
         self.freetype_path: Optional[Path] = None
+        self.python_root: Optional[Path] = None
+        self.python_name: Optional[Path] = None
         self.minor_version: int = 1
         self.cairo_support: bool = False
         self.swig_patch_enabled: bool = True
@@ -303,8 +306,22 @@ class NativeMaker:
         return self.config.cairo_path
 
     @property
+    def python_root(self) -> Path:
+        assert self.config.python_root
+        return self.config.python_root
+
+    @property
+    def python_name(self) -> Path:
+        assert self.config.python_name
+        return self.config.python_name
+
+    @property
     def boost_bin_path(self) -> Path:
         return self.boost_path / f"lib{self.address_model}-msvc-{get_msvc_internal_ver()}"
+
+    @property
+    def boost_b2_bin_path(self) -> Path:
+        return self.boost_path / "win32-x86_64/lib"
 
     @property
     def rdkit_csharp_build_path(self) -> Path:
@@ -411,7 +428,8 @@ class NativeMaker:
         replace_file_string(
             proj_file,
             [
-                (f"\\<{_V}>15\\.0\\<\\/{_V}\\>", f"<{_V}>{get_vs_ver()}</{_V}>",),
+                (f"\\<{_V}>15\\.0\\<\\/{_V}\\>",
+                 f"<{_V}>{get_vs_ver()}</{_V}>",),
                 (
                     f"\\<{_P}\\>v141\\<\\/{_P}\\>",
                     f"<{_P}>v{get_msvc_internal_ver().replace('.', '')}</{_P}>",
@@ -445,7 +463,8 @@ class NativeMaker:
                 match_and_add(pattern_c, c_files, line)
                 match_and_add(pattern_h, i_files, line)
 
-            pattern_c = re.compile("^\\s*libpixman_sources\\s*\\+\\=(?P<name>.*)$")
+            pattern_c = re.compile(
+                "^\\s*libpixman_sources\\s*\\+\\=(?P<name>.*)$")
             for line in makefile_to_lines(makefile_win32):
                 match_and_add(pattern_c, c_files, line)
 
@@ -475,7 +494,8 @@ class NativeMaker:
             vcxproj = "cairo.vcxproj"
             shutil.copy2(files_dir / vcxproj, proj_dir)
             proj_file = proj_dir / vcxproj
-            shutil.copy2(files_dir / "cairo-features.h", self.cairo_path / "src")
+            shutil.copy2(files_dir / "cairo-features.h",
+                         self.cairo_path / "src")
             self.vs15_proj_to_vscurr(proj_file)
             replace_file_string(
                 proj_file,
@@ -528,6 +548,9 @@ class NativeMaker:
         finally:
             os.chdir(_curdir)
 
+    def build_rdkit_python(self) -> None:
+        self._make_rdkit_cmake_python()        
+
     def copy_rdkit_dlls(self) -> None:
         self._copy_dlls()
 
@@ -535,7 +558,8 @@ class NativeMaker:
         if self.config.swig_patch_enabled:
             replace_file_string(
                 self.path_GraphMolCSharp_i,
-                [("boost::int32_t", "int32_t",), ("boost::uint32_t", "uint32_t",),],
+                [("boost::int32_t", "int32_t",),
+                 ("boost::uint32_t", "uint32_t",), ],
                 make_backup=True,
             )
         if self.config.cairo_support:
@@ -553,23 +577,49 @@ class NativeMaker:
             cmd = [a.replace("\\", "/") for a in cmd]
         call_subprocess(cmd)
 
-    def _get_cmake_rdkit_cmd_line(self) -> List[str]:
+    def _make_rdkit_cmake_python(self) -> None:
+        cmd: List[str] = self._get_cmake_rdkit_cmd_line(False)
+        if get_os() == "win":
+            cmd = [a.replace("\\", "/") for a in cmd]
+        # call_subprocess(cmd)
+        print(' '.join(cmd))
+
+
+    def _get_cmake_rdkit_cmd_line(self, csharp_build: bool = True) -> List[str]:
         def f_test():
             return "ON" if self.config.test_enabled else "OFF"
 
         args = [f"{str(self.rdkit_path)}"]
         args += self.g_option_of_cmake
-        args += [
-            "-DRDK_BUILD_SWIG_WRAPPERS=ON",
-            "-DRDK_BUILD_SWIG_CSHARP_WRAPPER=ON",
-            "-DRDK_BUILD_SWIG_JAVA_WRAPPER=OFF",
-            "-DRDK_BUILD_PYTHON_WRAPPERS=OFF",
-        ]
+        if csharp_build:
+            args += [
+                "-DRDK_BUILD_SWIG_WRAPPERS=ON",
+                "-DRDK_BUILD_SWIG_CSHARP_WRAPPER=ON",
+                "-DRDK_BUILD_SWIG_JAVA_WRAPPER=OFF",
+                "-DRDK_BUILD_PYTHON_WRAPPERS=OFF",
+            ]
         if self.config.boost_path:
             args += [
                 f"-DBOOST_ROOT={str(self.boost_path)}",
                 f"-DBOOST_INCLUDEDIR={str(self.boost_path)}",
-                f"-DBOOST_LIBRARYDIR={str(self.boost_bin_path)}",
+            ]
+            if csharp_build:
+                args += [
+                    f"-DBOOST_LIBRARYDIR={str(self.boost_bin_path)}",
+                ]
+            else:
+                args += [
+                    f"-DBOOST_LIBRARYDIR={str(self.boost_b2_bin_path)}",
+                ]
+        if not csharp_build:
+            args += [
+                "-DRDK_BUILD_PYTHON_WRAPPERS=ON",
+                f"-DPYTHON_LIBRARY={str(self.python_root)}\libs\{str(self.python_name)}.lib",
+                f"-DPYTHON_INCLUDE_DIR={str(self.python_root)}\include",
+                f"-DPYTHON_EXECUTABLE={str(self.python_root)}\python.exe",
+                f"-DRDK_BOOST_PYTHON3_NAME={str(self.python_name)}"
+                # f"-DCMAKE_INCLUDE_PATH={str(self.boost_path)}",
+                # f"-DCMAKE_LIBRARY_PATH={str(self.boost_b2_bin_path)}",W
             ]
         if self.config.eigen_path:
             args += [f"-DEIGEN3_INCLUDE_DIR={str(self.eigen_path)}"]
@@ -591,8 +641,9 @@ class NativeMaker:
                     f'-DCAIRO_INCLUDE_DIRS={self.cairo_path / "src"}',
                     f"-DCAIRO_LIBRARIES={cairo_lib_path}",
                 ]
+        intree = "OFF" if csharp_build else "ON"
         args += [
-            "-DRDK_INSTALL_INTREE=OFF",
+            f"-DRDK_INSTALL_INTREE={intree}",
             f"-DRDK_BUILD_CPP_TESTS={f_test()}",
             "-DRDK_USE_BOOST_REGEX=ON",
             "-DRDK_BUILD_COORDGEN_SUPPORT=ON",
@@ -612,8 +663,13 @@ class NativeMaker:
                 "-DRDK_USE_URF=ON",
             ]
             if get_os() == "win":
+                if csharp_build:
+                    args += [
+                        "-DRDK_SWIG_STATIC=OFF",
+                    ]
+                # static = "OFF" if csharp_build else "ON"
                 args += [
-                    "-DRDK_SWIG_STATIC=OFF",
+                    # f"-DRDK_INSTALL_STATIC_LIBS={static}",
                     "-DRDK_INSTALL_STATIC_LIBS=OFF",
                 ]
                 if get_os() == "win":
@@ -675,10 +731,12 @@ class NativeMaker:
         files_to_copy.append(a)
 
         if get_os() == "linux":
-            proc = subprocess.run(f"ldd {a}", shell=True, stdout=PIPE, text=True)
+            proc = subprocess.run(
+                f"ldd {a}", shell=True, stdout=PIPE, text=True)
             if proc.returncode != 0:
                 raise RuntimeError("Failed to execute ldd")
-            pat = re.compile(r" \/lib\/x86_64\-linux\-gnu\/([a-zA-Z_\-]+\.so(?:\.[0-9]+)*) ")
+            pat = re.compile(
+                r" \/lib\/x86_64\-linux\-gnu\/([a-zA-Z_\-]+\.so(?:\.[0-9]+)*) ")
             lib_path = Path("/usr/lib/x86_64-linux-gnu")
             for name in re.findall(pat, proc.stdout, flags=0):
                 files_to_copy.append(lib_path / name)
@@ -739,7 +797,8 @@ class NativeMaker:
             self._copy_test_projects()
             self._build_RDKit2DotNet()
         else:
-            raise RuntimeError("Building wrapper is supported only on Windows.")
+            raise RuntimeError(
+                "Building wrapper is supported only on Windows.")
 
     def _patch_rdkit_swig_files(self) -> None:
         # Customize the followings if required.
@@ -767,7 +826,8 @@ class NativeMaker:
         for filepath, patterns in (
             (
                 self.rdkit_swig_csharp_path / "RDKFuncsPINVOKE.cs",
-                [("(partial )?class RDKFuncsPINVOKE\\s*\\{", "partial class RDKFuncsPINVOKE {",)],
+                [("(partial )?class RDKFuncsPINVOKE\\s*\\{",
+                  "partial class RDKFuncsPINVOKE {",)],
             ),
             (
                 self.rdkit_swig_csharp_path / "RDKFuncsPINVOKE.cs",
@@ -811,14 +871,16 @@ class NativeMaker:
         property_group = SubElement(project, "PropertyGroup")
         sign_assembly = SubElement(property_group, "SignAssembly")
         sign_assembly.text = "true"
-        assembly_originator_key_file = SubElement(property_group, "AssemblyOriginatorKeyFile")
+        assembly_originator_key_file = SubElement(
+            property_group, "AssemblyOriginatorKeyFile")
         assembly_originator_key_file.text = "rdkit2dotnet.snk"
 
         # below is only for convenience to run test project
         item_group = SubElement(project, "ItemGroup")
         for cpu_model in typing.get_args(CpuModel):
             for filename in glob.glob(
-                str(self.rdkit_csharp_wrapper_path / get_os() / cpu_model / "*.dll")
+                str(self.rdkit_csharp_wrapper_path /
+                    get_os() / cpu_model / "*.dll")
             ):
                 dllbasename = os.path.basename(filename)
                 content = SubElement(item_group, "None")
@@ -826,7 +888,8 @@ class NativeMaker:
                 link_to_dll = f"runtimes\\\\{get_os()}-{cpu_model}\\\\native\\\\{dllbasename}"
                 content.attrib["Include"] = path_to_dll
                 content.attrib["Link"] = link_to_dll
-                copy_to_output_directory = SubElement(content, "CopyToOutputDirectory")
+                copy_to_output_directory = SubElement(
+                    content, "CopyToOutputDirectory")
                 copy_to_output_directory.text = "PreserveNewest"
         tree.write(path_RDKit2DotNet_csproj, "utf-8", True)
 
@@ -865,8 +928,10 @@ class NativeMaker:
                 ],
             )
         for name in self.test_sln_names:
-            shutil.copy2(path_rdkit_files / name, self.rdkit_csharp_wrapper_path)
-        print(f"Test slns {self.test_sln_names} are created in {self.rdkit_csharp_wrapper_path}.")
+            shutil.copy2(path_rdkit_files / name,
+                         self.rdkit_csharp_wrapper_path)
+        print(
+            f"Test slns {self.test_sln_names} are created in {self.rdkit_csharp_wrapper_path}.")
         print("RDKit2DotNetTest: .NET 5.0 example.")
         print("RDKit2DotNetTest2: .NET Framework 4 example.")
         print("NuGetExample: NuGet package example for .NET 5.0.")
@@ -878,7 +943,8 @@ class NativeMaker:
             os.chdir(self.path_RDKit2DotNet_folder)
             call_subprocess(["dotnet", "restore"])
             call_subprocess(
-                ["MSBuild", "RDKit2DotNet.csproj", "/t:Build", "/p:Configuration=Release"]
+                ["MSBuild", "RDKit2DotNet.csproj",
+                    "/t:Build", "/p:Configuration=Release"]
             )
         finally:
             os.chdir(_pushd_build_wrapper)
@@ -945,7 +1011,8 @@ class NativeMaker:
                         f'<file src="{_os}/{cpu_model}/{dll_basename}" '
                         f'target="runtimes/{_os}-{cpu_model}/native/{dll_basename}" />\n'
                     )
-        replace_file_string(nuspec_file, [("\\<nativefiles\\s*\\/\\>", "".join(nuspec_dlls_spec))])
+        replace_file_string(
+            nuspec_file, [("\\<nativefiles\\s*\\/\\>", "".join(nuspec_dlls_spec))])
 
     def _prepare_targets_file(self, dll_basenames_dic: Mapping[str, Mapping[str, Sequence[str]]]):
         targets_file = shutil.copy2(
@@ -993,7 +1060,8 @@ class NativeMaker:
                 targets_dlls_spec.append("</None>\\n")
         targets_dlls_spec.append("</ItemGroup>")
         replace_file_string(
-            targets_file, [("\\<nativefiles\\s*\\/\\>", "".join(targets_dlls_spec))]
+            targets_file, [("\\<nativefiles\\s*\\/\\>",
+                            "".join(targets_dlls_spec))]
         )
 
     def _build_nupkg(self):
@@ -1038,7 +1106,8 @@ class NativeMaker:
                     remove_if_exist(self.rdkit_path / f"build{_os}{p}CSharp")
         if self.config.freetype_path:
             for p in typing.get_args(CpuModel):
-                remove_if_exist(self.freetype_path / "objs" / _platform_to_ms_form[p])
+                remove_if_exist(self.freetype_path / "objs" /
+                                _platform_to_ms_form[p])
         if self.config.zlib_path:
             for p in typing.get_args(CpuModel):
                 remove_if_exist(self.zlib_path / "zconf.h")
@@ -1057,7 +1126,8 @@ def main() -> None:
     parser.add_argument(
         "--build_platform", default="all", choices=list(typing.get_args(CpuModel)) + ["all"]
     )
-    parser.add_argument("--disable_swig_patch", default=False, action="store_true")
+    parser.add_argument("--disable_swig_patch",
+                        default=False, action="store_true")
     for opt in (
         "build_zlib",
         "build_libpng",
@@ -1065,6 +1135,7 @@ def main() -> None:
         "build_freetype",
         "build_cairo",
         "build_rdkit",
+        "build_rdkit_python",
         "build_wrapper",
         "build_nuget",
     ):
@@ -1089,7 +1160,8 @@ def main() -> None:
         if args.clean:
             NativeMaker(config).clean()
         for cpu_model in (
-            typing.get_args(CpuModel) if args.build_platform == "all" else [args.build_platform]
+            typing.get_args(CpuModel) if args.build_platform == "all" else [
+                args.build_platform]
         ):
             maker = NativeMaker(config, cpu_model)
             if args.build_freetype:
@@ -1105,6 +1177,8 @@ def main() -> None:
             if args.build_rdkit:
                 maker.build_rdkit()
                 maker.copy_rdkit_dlls()
+            if args.build_rdkit_python:
+                maker.build_rdkit_python()
         # if required x64 is used as platform
         maker = NativeMaker(config)
         if args.build_wrapper:
@@ -1144,6 +1218,8 @@ def create_config(args: argparse.Namespace, config_info: Any):
         config.pixman_path = path_from_ini("PIXMAN_DIR")
         config.freetype_path = path_from_ini("FREETYPE_DIR")
         config.cairo_path = path_from_ini("CAIRO_DIR")
+        config.python_root = path_from_ini("PYTHON_ROOT")
+    config.python_name = config_info.get("PYTHON_NAME")
     config.eigen_path = path_from_ini("EIGEN_DIR")
     config.cairo_support = True
     config.test_enabled = False
