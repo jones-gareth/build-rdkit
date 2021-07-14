@@ -251,6 +251,11 @@ class NativeMaker:
         return f"build{get_os()}{self.build_platform}CSharp"
 
     @property
+    def build_dir_name_for_python(self) -> str:
+        assert self.build_platform
+        return f"build{get_os()}{self.build_platform}Python"
+
+    @property
     def ms_build_platform(self) -> MSPlatform:
         assert self.build_platform
         return _platform_to_ms_form[self.build_platform]
@@ -328,6 +333,10 @@ class NativeMaker:
         return self.rdkit_path / self.build_dir_name_for_csharp
 
     @property
+    def rdkit_python_build_path(self) -> Path:
+        return self.rdkit_path / self.build_dir_name_for_python
+
+    @property
     def rdkit_csharp_wrapper_path(self) -> Path:
         return self.rdkit_path / "Code" / "JavaWrappers" / "csharp_wrapper"
 
@@ -336,7 +345,10 @@ class NativeMaker:
         return self.rdkit_csharp_wrapper_path / "swig_csharp"
 
     def get_rdkit_version(self) -> int:
-        return int(re.sub(r".*_(\d\d\d\d)_(\d\d)_(\d)", r"\1\2\3", str(self.config.rdkit_path)))
+        # assume unversioned clone of master is latest RDKit
+        rdkit_path = str(self.config.rdkit_path)
+        ver = "Release_2021_03_1" if rdkit_path.endswith('rdkit') else rdkit_path
+        return int(re.sub(r".*_(\d\d\d\d)_(\d\d)_(\d)", r"\1\2\3", ver))
 
     def get_version_for_nuget(self) -> str:
         return f"0.{self.get_rdkit_version()}.{self.config.minor_version}"
@@ -549,10 +561,18 @@ class NativeMaker:
             os.chdir(_curdir)
 
     def build_rdkit_python(self) -> None:
-        self._make_rdkit_cmake_python()        
+        self.rdkit_python_build_path.mkdir(exist_ok=True)
+        _curdir = os.path.abspath(os.curdir)
+        os.chdir(self.rdkit_python_build_path)
+        try:
+            self._make_rdkit_cmake_python()        
+            self._build_rdkit_python()
+        finally:
+            os.chdir(_curdir)
 
-    def copy_rdkit_dlls(self) -> None:
-        self._copy_dlls()
+
+    def copy_rdkit_dlls(self, csharp_build=True) -> None:
+        self._copy_dlls(csharp_build)
 
     def _patch_i_files(self):
         if self.config.swig_patch_enabled:
@@ -581,8 +601,8 @@ class NativeMaker:
         cmd: List[str] = self._get_cmake_rdkit_cmd_line(False)
         if get_os() == "win":
             cmd = [a.replace("\\", "/") for a in cmd]
-        # call_subprocess(cmd)
-        print(' '.join(cmd))
+        print(f"running {' '.join(cmd)}")
+        call_subprocess(cmd)
 
 
     def _get_cmake_rdkit_cmd_line(self, csharp_build: bool = True) -> List[str]:
@@ -711,24 +731,32 @@ class NativeMaker:
         else:
             call_subprocess(["make", "-j", "RDKFuncs"])
 
-    def _copy_dlls(self) -> None:
+    def _build_rdkit_python(self) -> None:
+        args = ["cmake", "--build",  ".",  "--config", "Release", "--target install", "-j", "5"]
+        call_subprocess(args)
+
+    def _copy_dlls(self, csharp_build: bool = True) -> None:
         assert self.build_platform
-        dll_dest_path = self.rdkit_csharp_wrapper_path / get_os() / self.build_platform
-        remove_if_exist(dll_dest_path)
-        os.makedirs(dll_dest_path)
+        if csharp_build:
+            dll_dest_path = self.rdkit_csharp_wrapper_path / get_os() / self.build_platform
+            remove_if_exist(dll_dest_path)
+            os.makedirs(dll_dest_path)
+        else:
+            dll_dest_path = self.python_root;
         logging.info(f"Copy DLLs to {dll_dest_path}.")
 
         files_to_copy: List[Union[str, PathLike]] = []
         a: Path
 
-        a = self.rdkit_csharp_build_path / "Code" / "JavaWrappers" / "csharp_wrapper"
-        if get_os() == "win":
-            a = a / "Release" / "RDKFuncs.dll"
-        elif get_os() == "linux":
-            a = a / "RDKFuncs.so"
-        else:
-            raise RuntimeError
-        files_to_copy.append(a)
+        if csharp_build:
+            a = self.rdkit_csharp_build_path / "Code" / "JavaWrappers" / "csharp_wrapper"
+            if get_os() == "win":
+                a = a / "Release" / "RDKFuncs.dll"
+            elif get_os() == "linux":
+                a = a / "RDKFuncs.so"
+            else:
+                raise RuntimeError
+            files_to_copy.append(a)
 
         if get_os() == "linux":
             proc = subprocess.run(
@@ -744,7 +772,8 @@ class NativeMaker:
         # DLLs of rdkit. Since 2020_09_1 submodules are separated.
         if self.get_rdkit_version() >= 2020091:
             if get_os() == "win":
-                lib_path = self.rdkit_csharp_build_path / "bin" / "Release"
+                build_root = self.rdkit_csharp_build_path if csharp_build else self.rdkit_python_build_path
+                lib_path = build_root / "bin" / "Release"
                 for file_path in lib_path.glob("*.dll"):
                     files_to_copy.append(file_path)
             elif get_os() == "linux":
@@ -757,10 +786,11 @@ class NativeMaker:
         # TODO: Copy libraries' so files to local.
         if get_os() == "win":
             # DLLs of boost.
-            for file_path in self.boost_bin_path.glob("*.dll"):
+            boost_path = self.boost_bin_path if csharp_build else self.boost_b2_bin_path
+            for file_path in boost_path.glob("*.dll"):
                 if re.match(r".*\-vc\d\d\d\-mt\-x(32|64)\-\d_\d\d\.dll", file_path.name):
-                    # boost_python-vc###-mt-x##-#_##.dll is not needed.
-                    if not file_path.name.startswith("boost_python"):
+                    # boost_python-vc###-mt-x##-#_##.dll is not needed for csharp build.
+                    if not csharp_build or not file_path.name.startswith("boost_python"):
                         files_to_copy.append(file_path)
 
         if get_os() == "win":
@@ -789,6 +819,26 @@ class NativeMaker:
         # Copy files.
         for path in files_to_copy:
             shutil.copy2(path, dll_dest_path)
+
+        # install python module
+        if not csharp_build:
+            from_ = self.rdkit_path /"rdkit"
+            to = self.python_root / "Lib" / "site-packages" / "rdkit"
+            remove_if_exist(to)
+            logging.info(f"Installing {from_} in {to}")
+            shutil.copytree(from_, to)
+
+    def build_b2_boost(self):
+        # run the recipie described in https://github.com/rdkit/rdkit/issues/2841
+        boost_path = self.boost_path
+        _curdir = os.path.abspath(os.curdir)
+        try:
+            os.chdir(boost_path)
+            
+
+
+        finally:
+            os.chdir(_curdir)
 
     def build_csharp_wrapper(self) -> None:
         if get_os() == "win":
@@ -1149,6 +1199,10 @@ def main() -> None:
     if get_os() == "linux" and (args.build_platform == "all" or not args.build_platform):
         args.build_platform = "x64"
 
+    # python build x64 only
+    if args.build_rdkit_python:
+        args.build_platform = "x64"
+
     config_ini = configparser.ConfigParser()
     config_ini.read("config.ini", encoding="utf-8")
     default_config = config_ini["DEFAULT"]
@@ -1178,7 +1232,8 @@ def main() -> None:
                 maker.build_rdkit()
                 maker.copy_rdkit_dlls()
             if args.build_rdkit_python:
-                maker.build_rdkit_python()
+                #maker.build_rdkit_python()
+                maker.copy_rdkit_dlls(False)
         # if required x64 is used as platform
         maker = NativeMaker(config)
         if args.build_wrapper:
