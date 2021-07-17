@@ -17,7 +17,7 @@ import typing
 import xml.etree.ElementTree as ET
 from os import PathLike
 from pathlib import Path
-from subprocess import PIPE
+from subprocess import PIPE, call
 from typing import (
     Any,
     Collection,
@@ -219,7 +219,8 @@ class Config:
         self.cairo_path: Optional[Path] = None
         self.freetype_path: Optional[Path] = None
         self.python_root: Optional[Path] = None
-        self.python_name: Optional[Path] = None
+        self.python_name: str = None
+        self.python_version: str = None
         self.minor_version: int = 1
         self.cairo_support: bool = False
         self.swig_patch_enabled: bool = True
@@ -316,9 +317,14 @@ class NativeMaker:
         return self.config.python_root
 
     @property
-    def python_name(self) -> Path:
+    def python_name(self) -> str:
         assert self.config.python_name
         return self.config.python_name
+
+    @property
+    def python_version(self) -> str:
+        assert self.config.python_version
+        return self.config.python_version
 
     @property
     def boost_bin_path(self) -> Path:
@@ -347,7 +353,8 @@ class NativeMaker:
     def get_rdkit_version(self) -> int:
         # assume unversioned clone of master is latest RDKit
         rdkit_path = str(self.config.rdkit_path)
-        ver = "Release_2021_03_1" if rdkit_path.endswith('rdkit') else rdkit_path
+        ver = "Release_2021_03_1" if rdkit_path.endswith(
+            'rdkit') else rdkit_path
         return int(re.sub(r".*_(\d\d\d\d)_(\d\d)_(\d)", r"\1\2\3", ver))
 
     def get_version_for_nuget(self) -> str:
@@ -565,11 +572,10 @@ class NativeMaker:
         _curdir = os.path.abspath(os.curdir)
         os.chdir(self.rdkit_python_build_path)
         try:
-            self._make_rdkit_cmake_python()        
+            self._make_rdkit_cmake_python()
             self._build_rdkit_python()
         finally:
             os.chdir(_curdir)
-
 
     def copy_rdkit_dlls(self, csharp_build=True) -> None:
         self._copy_dlls(csharp_build)
@@ -603,7 +609,6 @@ class NativeMaker:
             cmd = [a.replace("\\", "/") for a in cmd]
         print(f"running {' '.join(cmd)}")
         call_subprocess(cmd)
-
 
     def _get_cmake_rdkit_cmd_line(self, csharp_build: bool = True) -> List[str]:
         def f_test():
@@ -732,7 +737,8 @@ class NativeMaker:
             call_subprocess(["make", "-j", "RDKFuncs"])
 
     def _build_rdkit_python(self) -> None:
-        args = ["cmake", "--build",  ".",  "--config", "Release", "--target install", "-j", "5"]
+        args = ["cmake", "--build",  ".",  "--config",
+                "Release", "--target install", "-j", "5"]
         call_subprocess(args)
 
     def _copy_dlls(self, csharp_build: bool = True) -> None:
@@ -742,7 +748,7 @@ class NativeMaker:
             remove_if_exist(dll_dest_path)
             os.makedirs(dll_dest_path)
         else:
-            dll_dest_path = self.python_root;
+            dll_dest_path = self.python_root
         logging.info(f"Copy DLLs to {dll_dest_path}.")
 
         files_to_copy: List[Union[str, PathLike]] = []
@@ -822,20 +828,63 @@ class NativeMaker:
 
         # install python module
         if not csharp_build:
-            from_ = self.rdkit_path /"rdkit"
+            from_ = self.rdkit_path / "rdkit"
             to = self.python_root / "Lib" / "site-packages" / "rdkit"
             remove_if_exist(to)
             logging.info(f"Installing {from_} in {to}")
             shutil.copytree(from_, to)
 
     def build_b2_boost(self):
-        # run the recipie described in https://github.com/rdkit/rdkit/issues/2841
+        # run the recipe described in https://github.com/rdkit/rdkit/issues/2841
         boost_path = self.boost_path
         _curdir = os.path.abspath(os.curdir)
         try:
             os.chdir(boost_path)
-            
+            if not os.path.exists("zlib-1.2.11"):
+                logging.info("Downloading zlib")
+                cmd = ["curl.exe", "-L", "https://www.zlib.net/zlib-1.2.11.tar.gz",
+                       "-o", "zlib-1.2.11.tar.gz"]
+                call_subprocess(cmd)
+                logging.info("Untaring zlib")
+                cmd = ["cmake.exe", "-E", "tar", "xzf", "zlib-1.2.11.tar.gz"]
+                call_subprocess(cmd)
 
+            if not os.path.exists("bzip2-1.0.6 "):
+                logging.info("Downloading bzip")
+                cmd = ["curl.exe", "-L",
+                       "https://downloads.sourceforge.net/project/bzip2/bzip2-1.0.6.tar.gz",
+                       "-o", "bzip2-1.0.6.tar.gz"]
+                call_subprocess(cmd)
+                logging.info("Untaring bzip")
+                cmd = ["cmake.exe", "-E", "tar", "xzf", "bzip2-1.0.6.tar.gz"]
+                call_subprocess(cmd)
+
+            logging.info("Bootstrapping")
+            cmd = ["bootstrap.bat", "--without-icu"]
+            call_subprocess(cmd)
+
+            python_path = (str(self.python_root)).replace("\\", "\\\\")
+            with open("user-config.jam", "w") as fh:
+                lines = ["using python\n",
+                         f"    : {self.python_version}                   # Version\n",
+                         f"    : {python_path}\\\\python.exe      # Python Path\n",
+                         f"    : {python_path}\\\\Include         # include path\n",
+                         f"    : {python_path}\\\\libs            # lib path(s)\n",
+                         "    ;\n"]
+                fh.writelines(lines)
+
+            logging.info("Cleaning all")
+            cmd = ["b2",  "--clean-all"]
+            call_subprocess(cmd)
+
+            logging.info("Building with b2")
+            cmd = ["b2", "--user-config=user-config.jam", "--stagedir=win32-x86_64", "address-model=64",
+                   "architecture=x86", "threading=multi", "variant=release", "link=shared", "stage",
+                   "--with-regex", "--disable-icu", "--with-thread",
+                   "--with-serialization", "--with-iostreams", "--with-python", "--with-program_options", "--with-system",
+                   f"-sBZIP2_SOURCE={boost_path}\bzip2-1.0.6", f"-sZLIB_SOURCE={boost_path}\zlib-1.2.11", "-sNO_LZMA=1",
+                   "python-debugging=off"]
+            call_subprocess(cmd)
 
         finally:
             os.chdir(_curdir)
@@ -943,7 +992,7 @@ class NativeMaker:
                 copy_to_output_directory.text = "PreserveNewest"
         tree.write(path_RDKit2DotNet_csproj, "utf-8", True)
 
-    @property
+    @ property
     def test_csprojects(self) -> Collection[str]:
         return (
             "RDKit2DotNetTest",
@@ -952,7 +1001,7 @@ class NativeMaker:
             "NuGetExample2",
         )
 
-    @property
+    @ property
     def test_sln_names(self) -> Collection[str]:
         return (
             "RDKit2DotNet.sln",
@@ -1188,6 +1237,7 @@ def main() -> None:
         "build_rdkit_python",
         "build_wrapper",
         "build_nuget",
+        "build_boost"
     ):
         parser.add_argument(f"--{opt}", default=False, action="store_true")
     parser.add_argument("--clean", default=False, action="store_true")
@@ -1232,7 +1282,7 @@ def main() -> None:
                 maker.build_rdkit()
                 maker.copy_rdkit_dlls()
             if args.build_rdkit_python:
-                #maker.build_rdkit_python()
+                maker.build_rdkit_python()
                 maker.copy_rdkit_dlls(False)
         # if required x64 is used as platform
         maker = NativeMaker(config)
@@ -1240,6 +1290,8 @@ def main() -> None:
             maker.build_csharp_wrapper()
         if args.build_nuget:
             maker.build_nuget_package()
+        if args.build_boost:
+            maker.build_b2_boost()
     finally:
         os.chdir(curr_dir)
 
@@ -1275,6 +1327,7 @@ def create_config(args: argparse.Namespace, config_info: Any):
         config.cairo_path = path_from_ini("CAIRO_DIR")
         config.python_root = path_from_ini("PYTHON_ROOT")
     config.python_name = config_info.get("PYTHON_NAME")
+    config.python_version = config_info.get("PYTHON_VERSION")
     config.eigen_path = path_from_ini("EIGEN_DIR")
     config.cairo_support = True
     config.test_enabled = False
