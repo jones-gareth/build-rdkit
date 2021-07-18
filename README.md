@@ -1,3 +1,48 @@
+# RDKit for Windows Python
+
+Extends RDKit for .NET framework to build RKit libraries for Python.org windows distribution.  Boost libraries compiled using recipe based on [RDKit issue 2841](https://github.com/rdkit/rdkit/issues/2841).
+
+Tested on the following
+
+- [Boost 1.7.2](https://boostorg.jfrog.io/artifactory/main/release/1.72.0/source/boost_1_72_0.tar.gz)
+- [Python 3.9](https://www.python.org/ftp/python/3.9.0/python-3.9.0-amd64.exe)
+- [Rdkit master as of 6/28/2021](https://github.com/rdkit)
+- Visual studio 2019 with CMake
+
+## Prerequisites
+
+Pre-build tasks
+
+- Download and install windows Python
+- Add packages required by RDkit or Spotfire
+  `pip install numpy pandas pip python-dateutil pytz six setuptools wheel bitstring spotfire biopython`
+- Download and unpack Boost source
+- Download and unpack RDKit source
+- Using the instructions below download and unpack other RDKit dependencies:
+  - Eigen
+  - Cairo
+  - libpng
+  - pixman
+  - zlib
+  - FreeType
+- Update `config.ini` with paths and versions for downloaded files
+
+## Build
+
+Open VS command prompt as use Python script to perform build tasks: `python .\build_rdkit_csharp.py -h`
+
+- Open 'Developer Command Prompt for VS 2019'.
+- Execute `python .\build_rdkit_csharp.py --build_freetype` to make FreeType.
+- Execute `python .\build_rdkit_csharp.py --build_zlib` to make zlib.
+- Execute `python .\build_rdkit_csharp.py --build_libpng` to make libpng.
+- Execute `python .\build_rdkit_csharp.py --build_pixman` to make pixman.
+- Execute `python .\build_rdkit_csharp.py --build_cairo` to make cairo.
+- Execute `python .\build_rdkit_csharp.py --build_boost` to make boost.
+- Execute `python .\build_rdkit_csharp.py --build_rdkit_python` to make and install Python module.
+
+Following the build RDKit DLLs and dependent DLLs are installed to the root of the Python installation.  
+The RDKit module is installed in `Lib/site-packages` in the Python installation.
+
 # RDKit for .NET Framework
 
 - .NET Framework wrapper of RDKit.
